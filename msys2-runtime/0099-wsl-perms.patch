@@ -1,0 +1,196 @@
+From 152e737065c1e6d5dab44390d8530ee40a031708 Mon Sep 17 00:00:00 2001
+From: JS Deck <jsdeckerido@gmail.com>
+Date: Sun, 29 Mar 2020 07:08:16 -0300
+Subject: [PATCH] Add wsl_perms option to MSYS environment variable
+
+---
+ winsup/cygwin/environ.cc            |  1 +
+ winsup/cygwin/fhandler.h            |  5 +-
+ winsup/cygwin/fhandler_disk_file.cc | 75 ++++++++++++++++++++++++++++-
+ winsup/cygwin/globals.cc            |  1 +
+ 4 files changed, 79 insertions(+), 3 deletions(-)
+
+diff --git a/winsup/cygwin/environ.cc b/winsup/cygwin/environ.cc
+index 05ed476a5..6f844c49c 100644
+--- a/winsup/cygwin/environ.cc
++++ b/winsup/cygwin/environ.cc
+@@ -120,6 +120,7 @@ static struct parse_thing
+   {"reset_com", {&reset_com}, setbool, NULL, {{false}, {true}}},
+   {"wincmdln", {&wincmdln}, setbool, NULL, {{false}, {true}}},
+   {"winsymlinks", {func: set_winsymlinks}, isfunc, NULL, {{0}, {0}}},
++  {"wsl_perms", {&wsl_perms}, setbool, NULL, {{false}, {true}}},
+   {NULL, {0}, setdword, 0, {{0}, {0}}}
+ };
+ 
+diff --git a/winsup/cygwin/fhandler.h b/winsup/cygwin/fhandler.h
+index 0da87e985..1a2b18b93 100644
+--- a/winsup/cygwin/fhandler.h
++++ b/winsup/cygwin/fhandler.h
+@@ -355,8 +355,11 @@ class fhandler_base
+   virtual int __reg2 fstat (struct stat *buf);
+   void __reg2 stat_fixup (struct stat *buf);
+   int __reg2 fstat_fs (struct stat *buf);
++protected:
++  int set_lxmod (mode_t mode);
++  int get_lxmod (mode_t *mode);
+ private:
+-  int __reg2 fstat_helper (struct stat *buf);
++  int __reg2 fstat_helper (struct stat *buf, bool mode_only = false);
+   int __reg2 fstat_by_nfs_ea (struct stat *buf);
+   int __reg2 fstat_by_handle (struct stat *buf);
+   int __reg2 fstat_by_name (struct stat *buf);
+diff --git a/winsup/cygwin/fhandler_disk_file.cc b/winsup/cygwin/fhandler_disk_file.cc
+index 193192762..16fabd23d 100644
+--- a/winsup/cygwin/fhandler_disk_file.cc
++++ b/winsup/cygwin/fhandler_disk_file.cc
+@@ -395,7 +395,7 @@ fhandler_base::fstat_fs (struct stat *buf)
+ }
+ 
+ int __reg2
+-fhandler_base::fstat_helper (struct stat *buf)
++fhandler_base::fstat_helper (struct stat *buf, bool mode_only)
+ {
+   IO_STATUS_BLOCK st;
+   FILE_COMPRESSION_INFORMATION fci;
+@@ -403,6 +403,8 @@ fhandler_base::fstat_helper (struct stat *buf)
+   PFILE_ALL_INFORMATION pfai = pc.fai ();
+   ULONG attributes = pc.file_attributes ();
+ 
++  if (mode_only) goto mode_helper;
++
+   to_timestruc_t (&pfai->BasicInformation.LastAccessTime, &buf->st_atim);
+   to_timestruc_t (&pfai->BasicInformation.LastWriteTime, &buf->st_mtim);
+   /* If the ChangeTime is 0, the underlying FS doesn't support this timestamp
+@@ -458,7 +460,13 @@ fhandler_base::fstat_helper (struct stat *buf)
+     /* Otherwise compute no. of blocks from file size. */
+     buf->st_blocks = (buf->st_size + S_BLKSIZE - 1) / S_BLKSIZE;
+ 
++ mode_helper:
+   buf->st_mode = 0;
++  mode_t lxmod;
++  bool has_lxmod = false;
++  if (wsl_perms)
++    has_lxmod = get_lxmod (&lxmod) > 0;
++
+   /* Using a side effect: get_file_attributes checks for directory.
+      This is used, to set S_ISVTX, if needed.  */
+   if (pc.isdir ())
+@@ -515,6 +523,10 @@ fhandler_base::fstat_helper (struct stat *buf)
+       else
+ 	{
+ 	  buf->st_mode |= S_IFREG;
++
++	  if (has_lxmod)
++	    goto lxmod_helper;
++
+ 	  /* Check suffix for executable file. */
+ 	  if (pc.exec_state () != is_executable)
+ 	    {
+@@ -576,6 +588,12 @@ fhandler_base::fstat_helper (struct stat *buf)
+       if (has_acls ())
+ 	buf->st_mode &= ~(S_IROTH | S_IWOTH | S_IXOTH);
+     }
++ lxmod_helper:
++  if (has_lxmod)
++    {
++      buf->st_mode &= ~ACCESSPERMS;
++      buf->st_mode |= lxmod;
++    }
+ 
+  done:
+   syscall_printf ("0 = fstat (%S, %p) st_size=%D, st_mode=0%o, st_ino=%D"
+@@ -704,6 +722,14 @@ fhandler_disk_file::fchmod (mode_t mode)
+   NTSTATUS status;
+   IO_STATUS_BLOCK io;
+ 
++  if (wsl_perms)
++    {
++      int ret = set_lxmod (mode);
++      if (ret <= 0)
++	debug_printf ("Writing $LXMOD during chmod failed, "
++		      "write_ea = %d", ret);
++    }
++
+   if (pc.is_fs_special ())
+     return chmod_device (pc, mode);
+ 
+@@ -1393,7 +1419,16 @@ fhandler_disk_file::fhandler_disk_file (path_conv &pc) :
+ int
+ fhandler_disk_file::open (int flags, mode_t mode)
+ {
+-  return open_fs (flags, mode);
++  bool new_file = !exists ();
++  int ret = open_fs (flags, mode);
++  if (wsl_perms && ret >= 0 && new_file)
++    {
++      int ret = set_lxmod (mode & ~cygheap->umask);
++      if (ret <= 0)
++	debug_printf ("Writing $LXMOD during open failed, "
++		      "write_ea = %d", ret);
++    }
++  return ret;
+ }
+ 
+ int
+@@ -1778,6 +1813,15 @@ fhandler_disk_file::mkdir (mode_t mode)
+       pc.file_attributes (FILE_ATTRIBUTE_DIRECTORY);
+       if (has_acls ())
+ 	set_created_file_access (dir, pc, mode & 07777);
++
++      if (wsl_perms)
++	{
++	  int ret = set_lxmod (mode & ~cygheap->umask);
++	  if (ret <= 0)
++	    debug_printf ("Writing $LXMOD during mkdir failed, "
++			  "write_ea = %d", ret);
++	}
++
+ #if 0
+       /* FIXME: This default behaviour badly breaks interoperability.
+ 		Inspecting the content of case-sensitive directories
+@@ -2690,3 +2734,30 @@ fhandler_disk_file::ioctl (unsigned int cmd, void *p)
+   syscall_printf ("%d = ioctl_file(%x, %p)", ret, cmd, p);
+   return ret;
+ }
++
++static const char lxmod_ea_name[] = "user.$LXMOD";
++
++int
++fhandler_base::set_lxmod (mode_t mode)
++{
++  if (pc.fs_is_nfs ()) return 0;
++
++  struct stat st;
++  fstat_helper (&st, true);
++  uint32_t lxmod = st.st_mode;
++  lxmod &= ~ACCESSPERMS;
++  lxmod |= mode & ACCESSPERMS;
++  return write_ea (get_handle (), pc, lxmod_ea_name,
++		   (const char *) &lxmod, sizeof (lxmod), 0);
++}
++
++int
++fhandler_base::get_lxmod (mode_t *mode)
++{
++  uint32_t lxmod;
++  int ret = read_ea (get_stat_handle (), pc, lxmod_ea_name,
++		     (char *) &lxmod, sizeof (lxmod));
++  if (ret > 0)
++    *mode = lxmod & ACCESSPERMS;
++  return ret;
++}
+diff --git a/winsup/cygwin/globals.cc b/winsup/cygwin/globals.cc
+index 05ff5f0cd..7782e7da1 100644
+--- a/winsup/cygwin/globals.cc
++++ b/winsup/cygwin/globals.cc
+@@ -71,6 +71,7 @@ bool pipe_byte;
+ bool reset_com;
+ bool wincmdln;
+ winsym_t allow_winsymlinks = WSYM_sysfile;
++bool wsl_perms = false;
+ 
+ bool NO_COPY in_forkee;
+ 
+-- 
+2.26.0
+

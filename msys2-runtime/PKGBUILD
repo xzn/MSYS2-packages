@@ -25,7 +25,7 @@ makedepends=('cocom'
 # options=('debug' '!strip')
 source=('msys2-runtime'::git://sourceware.org/git/newlib-cygwin.git#tag=cygwin-${pkgver//./_}-release
         0001-Add-MSYS2-triplet.patch
-        0002-Rename-dll-from-cygwin-to-msys.patch
+        0002-Rename-DLL-from-cygwin-to-msys.patch
         0003-Add-functionality-for-converting-UNIX-paths-in-argum.patch
         0004-Add-functionality-for-changing-OS-name-via-MSYSTEM-e.patch
         0005-Move-root-to-usr.-Change-sorting-mount-points.-Do-no.patch
@@ -43,6 +43,7 @@ source=('msys2-runtime'::git://sourceware.org/git/newlib-cygwin.git#tag=cygwin-$
         0025-QueryUnbiasedInterruptTime-must-be-load-from.patch
         0026-mkdir-always-check-for-existence.patch
         0027-gcc8-errors.patch
+        0099-wsl-perms.patch
 )
 sha256sums=('SKIP'
             'df193299ab04aca8a049b2b98d025452caad95f27fba5a1f1b350f74a82c24f1'
@@ -63,7 +64,8 @@ sha256sums=('SKIP'
             '50d8a52cc33501898e7a01b00e8e5965c1ef7f37f26039a4380788ce7639a04c'
             'b31e2bee92561594bf2db52f361ab2507e979797bec82955dc00f521ebee72b5'
             'c68b687540668f0871a901143510666b8b9a59c12eae0ea9bef187d1af38c493'
-            '4e971710c4e277f64a5d7654dab92850b693659ebac3bdcb21898313c2c659b5')
+            '4e971710c4e277f64a5d7654dab92850b693659ebac3bdcb21898313c2c659b5'
+            'ad572f50979f4018952fc506f78cd2c5bb4bc0876e3f0186698615c8dc1f8211')
 
 # Helper macros to help make tasks easier #
 apply_patch_with_msg() {
@@ -97,7 +99,7 @@ prepare() {
   del_file_exists winsup/cygwin/msys2_path_conv.cc \
     winsup/cygwin/msys2_path_conv.h 
  apply_git_am_with_msg 0001-Add-MSYS2-triplet.patch \
-  0002-Rename-dll-from-cygwin-to-msys.patch \
+  0002-Rename-DLL-from-cygwin-to-msys.patch \
   0003-Add-functionality-for-converting-UNIX-paths-in-argum.patch \
   0004-Add-functionality-for-changing-OS-name-via-MSYSTEM-e.patch \
   0005-Move-root-to-usr.-Change-sorting-mount-points.-Do-no.patch \
@@ -114,11 +116,11 @@ prepare() {
   0024-Fix-native-symbolic-link-spawn-passing-wrong-arg0.patch \
   0025-QueryUnbiasedInterruptTime-must-be-load-from.patch \
   0026-mkdir-always-check-for-existence.patch \
-  0027-gcc8-errors.patch
+  0027-gcc8-errors.patch \
+  0099-wsl-perms.patch
 }
 
 build() {
-  [[ -d "${srcdir}"/build-${CHOST} ]] && rm -rf "${srcdir}"/build-${CHOST}
   mkdir -p "${srcdir}"/build-${CHOST} && cd "${srcdir}"/build-${CHOST}
 
   # Gives more verbose compile output when debugging.
